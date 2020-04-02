@@ -1,0 +1,162 @@
+---
+title: "Heritability of using MCMCglmm"
+author: "Abby Hudak"
+date: "4/2/2020"
+output: html_document
+---
+An example of how to set up a pedigree and calculate additive genetic variance with MCMCglmm package 
+
+**Read in and manipulate growth data.**
+```{r message=FALSE, warning=FALSE}
+library(tidyverse)
+library(rcompanion)
+
+setwd("C:/Users/abby/Desktop/Science!/snail data")
+growth_all<-read.csv("growth_clean.csv", header=T)
+
+#Change IDs to work with MCMCglmmm.  Remove population ID and multiply by 1000.
+growth_all$ID<-gsub("KH.", "", paste(growth_all$ID))
+growth_all$ID<-gsub("BB.", "", paste(growth_all$ID))
+
+growth_all$ID<-as.numeric(growth_all$ID)
+growth_all$ID<-growth_all$ID * 1000
+
+#Calculate average aperture index from week 12 to 22 (time individuals are at asymptotic size)
+#subset weeks 12-22
+growth12_22<-filter(growth_all, weeks_old > 10)
+
+#calculate length means for each week per treatment 
+ index.avg<-aggregate(x=growth12_22$index,
+                      by=list(growth12_22$ID, growth12_22$genotype, growth12_22$treatment),
+                      FUN=mean)
+names(index.avg) <-c("animal", "Damid", "treatment", "index")
+
+#add in a column called Sireid filled in with NA. Sireis required for MCMCglmm pedigree.
+index.avg$Sireid<-NA
+
+#separate by treatment 
+index.avg.BB<-index.avg[(index.avg$treatment == "BB"),]
+
+#check for normality.  Assume normality if p > 0.05
+shapiro.test(index.avg.BB$index)
+
+```
+
+**MCMCglmmm package to calculate additive genetic variance** 
+```{r warning=FALSE, message = FALSE}
+library(MasterBayes)
+library(MCMCglmm)
+library(plyr)
+library(ggplot2)
+
+```
+
+**Creating a pedigree**
+```{r}
+
+#Subset columns with offpsring and parental IDs
+heritPed<-subset(index.avg.BB,select=c(animal,Damid, Sireid))
+
+#sort by animal number
+heritPed<-heritPed[order(heritPed$animal),]
+
+# Completes a pedigree with missing information for some sires and dams 
+# by adding the generation in which all Dams and Sires were unknown
+heritPed<-insertPed(heritPed, founders=NULL)
+
+#identify Dam and Sire as numeric
+heritPed$Damid <- as.numeric(heritPed$Damid)
+heritPed$Sireid <- as.numeric(heritPed$Sireid)
+
+index.avg.BB$Damid <- as.numeric(index.avg.BB$Damid)
+index.avg.BB$Sireid <- as.numeric(index.avg.BB$Sireid)
+
+
+```
+
+**Running the model**
+```{r echo=T, results = "hide"}
+# set up parameters for the priors
+# Fixed effects are automatically set by MCMCglmm to follow a normal distribution 
+# Set weak priors that will be used in an inverse gamma distribution automatically set by MCMCglmm
+# R is residual effects for each specified random effect and follows same rules as G
+
+prior101 <- list(R = list(V=1, nu=0.002), G = list(G1 = list(V=1, nu=.002)))
+
+#model statement
+model101.BBindex.a <- MCMCglmm(index ~ 1,             #intercept (the 1) is the fixed effect
+                     random = ~animal,                #additive effects (animal) the only random effect
+                     family = "gaussian",             #phenotype has gaussian distribution
+                     prior = prior101,                #call the priors parameters defined above
+                     data = index.avg.BB,             #call the data file
+                     nitt = 1000000,                  #number of MCMC iterations 
+                     burnin = 1000,                   #number of iterations for burnin
+                     thin = 500,                      #sampling interval
+                     pedigree = heritPed) 
+```
+
+**Check success of model**
+```{r}
+#Should be no trend in trace (white noise appearing)
+#Density plots should appear normally distributed 
+#plot trace and density of fixed effects
+plot(model101.BBindex.a$Sol)
+#plot trace and density of random (additive and residual (=environmental)) variances
+plot(model101.BBindex.a$VCV)
+
+#examine autocorrelation of fixed effects
+autocorr.diag(model101.BBindex.a$Sol)
+#examine autocorrelation of random (additive and residual) variances
+autocorr.diag(model101.BBindex.a$VCV)
+
+#check effective population size for fixed effects; should be gt 1000
+effectiveSize(model101.BBindex.a$Sol)
+#check effective population size for random effects (additve and residual variances); should be gt 1000
+effectiveSize(model101.BBindex.a$VCV)
+
+#test of convergence, p should be greater than 0.05 for good convergence
+heidel.diag(model101.BBindex.a$VCV)
+
+#estimates of additive and residual variances
+posterior.mode(model101.BBindex.a$VCV)
+
+#summary of model; make sure to check DIC score (smaller is better)
+summary(model101.BBindex.a)
+
+```
+
+
+**Calculate broad-sense heritability**
+```{r tidy=FALSE}
+#estimate posterior distribution of the heritability (animal vairance divided by animal +  residual variances)
+herit <- model101.BBindex.a$VCV[, "animal"]/(model101.BBindex.a$VCV[, "animal"] + model101.BBindex.a$VCV[, "units"])
+
+#effective sample size for heritability should be > 1000
+effectiveSize(herit)
+
+# get the mean from the posterior disribution of heritability
+mean(herit)
+
+# get confidence interval for heritability
+HPDinterval(herit)
+
+#plot the trace of heritability
+plot(herit)
+
+```
+
+**Improving model estimates**
+```{r eval=FALSE}
+#increase nitt, burnin, and thin to get better estimates
+model101.BBindex.b <- MCMCglmm(index ~ 1,             #intercept (the 1) is the fixed effect
+                     random = ~animal,                #additive effects (animal) the only random effect
+                     family = "gaussian",             #phenotype has gaussian distribution
+                     prior = prior101,                #call the priors parameters defined above
+                     data = index.avg.BB,             #call the data file
+                     nitt = 1000000,                  #number of MCMC iterations 
+                     burnin = 10000,                  #number of iterations for burnin
+                     thin = 1000,                     #sampling interval
+                     pedigree = heritPed)
+
+```
+
